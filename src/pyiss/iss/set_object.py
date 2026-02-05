@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Union
+from more_itertools import first
 import pandas as pd
 
 from .preview import gallery
@@ -166,10 +167,17 @@ class ISSSet:
         win["dt_prev_s"] = win["time1"].diff().dt.total_seconds().abs()
         win["dt_next_s"] = win["time1"].shift(-1).sub(win["time1"]).dt.total_seconds().abs()
 
-        # Make the set edges clean
         set_idxs = win.index[win["_role"] == "set"].tolist()
         if set_idxs:
-            win.loc[set_idxs[0], "dt_prev_s"] = pd.NA
-            win.loc[set_idxs[-1], "dt_next_s"] = pd.NA
+            first = set_idxs[0]
+            last  = set_idxs[-1]
+
+        # If row A exists, mirror A->first gap into first.dt_prev_s
+        if first > 0 and win.loc[first - 1, "_role"] == "A":
+            win.loc[first, "dt_prev_s"] = win.loc[first - 1, "dt_next_s"]
+
+        # If row Z exists, mirror last->Z gap into last.dt_next_s
+        if last + 1 < len(win) and win.loc[last + 1, "_role"] == "Z":
+            win.loc[last, "dt_next_s"] = win.loc[last + 1, "dt_prev_s"]
 
         return win
