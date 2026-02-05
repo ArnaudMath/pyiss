@@ -4,8 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 import pandas as pd
 
-from .preview import gallery  # your existing HTML preview
-from ..opus import full_preview_url
+from .preview import gallery
 
 
 @dataclass(frozen=True)
@@ -48,7 +47,7 @@ class ISSSet:
     @property
     def available_filters(self) -> list[str]:
         # Keep order of appearance (time-ordered)
-        seen = []
+        seen: list[str] = []
         for f in self._set_df[self._filter_col].astype(str).tolist():
             if f not in seen:
                 seen.append(f)
@@ -65,15 +64,13 @@ class ISSSet:
     # Selection helpers
     # --------------------
     def _rows_for_filter(self, filt: str) -> pd.DataFrame:
-        if filt == "all":
+        if str(filt).lower() == "all":
             return self._set_df
         return self._set_df[self._set_df[self._filter_col].astype(str) == str(filt)]
 
     def _one_or_many(self, rows: pd.DataFrame, field: str, *, all: bool):
         vals = rows[field].tolist()
-        if all:
-            return vals
-        return vals[0]  # assumes at least 1 match
+        return vals if all else vals[0]
 
     # --------------------
     # Metadata getters
@@ -93,9 +90,7 @@ class ISSSet:
     def row(self, filt: str, *, all: bool = False) -> Union[pd.Series, pd.DataFrame]:
         """Return the row(s) for a filter; useful for quick inspection."""
         rows = self._rows_for_filter(filt)
-        if all:
-            return rows.reset_index(drop=True)
-        return rows.iloc[0]
+        return rows.reset_index(drop=True) if all else rows.iloc[0]
 
     # --------------------
     # Display
@@ -105,42 +100,76 @@ class ISSSet:
         Show full-preview images for a filter or the entire set.
         """
         rows = self._rows_for_filter(filt)
-        # Reuse your gallery function which expects a df with opusid/time1/COISSfilter
         gallery(rows)
 
     # --------------------
     # Diagnostics (opt-in)
     # --------------------
-    def diagnostics(self) -> pd.DataFrame:
+    def diagnostic_window(self) -> pd.DataFrame:
         """
-        Returns a copy of the set df with:
-          - dt_prev_s / dt_next_s: within-set gaps
-          - boundary gaps folded into dt_prev_s (first row) and dt_next_s (last row)
-        Requires neigh_df to be present (it is if created via infer_set()).
+        Return a dataframe containing:
+          [row A] + [set rows] + [row Z]
+
+        where:
+          - row A = last neighbour before set start (from neigh_df)
+          - row Z = first neighbour after set end (from neigh_df)
+
+        dt_prev_s/dt_next_s are computed on THIS window so boundaries are explicit:
+          - A.dt_next_s = gap(A -> first set row)
+          - first set row dt_prev_s = NA
+          - last set row dt_next_s = NA
+          - Z.dt_prev_s = gap(last set row -> Z)
         """
-        df = self._set_df.copy()
-        df = df.sort_values(["time1", "opusid"]).reset_index(drop=True)
+        if self._neigh_df is None or len(self._neigh_df) == 0:
+            raise ValueError("diagnostic_window() requires neigh_df; create the set via infer_set().")
 
-        df["dt_prev_s"] = df["time1"].diff().dt.total_seconds().abs()
-        df["dt_next_s"] = df["time1"].shift(-1).sub(df["time1"]).dt.total_seconds().abs()
+        set_df = self._set_df.copy()
+        set_df["time1"] = pd.to_datetime(set_df["time1"], utc=True)
+        set_df = set_df.sort_values(["time1", "opusid"]).reset_index(drop=True)
 
-        if self._neigh_df is not None and len(self._neigh_df) > 0:
-            neigh = self._neigh_df.copy()
-            neigh["time1"] = pd.to_datetime(neigh["time1"], utc=True)
-            neigh = neigh.sort_values(["time1", "opusid"]).reset_index(drop=True)
+        neigh = self._neigh_df.copy()
+        neigh["time1"] = pd.to_datetime(neigh["time1"], utc=True)
+        neigh = neigh.sort_values(["time1", "opusid"]).reset_index(drop=True)
 
-            set_start = df["time1"].iloc[0]
-            set_end = df["time1"].iloc[-1]
+        set_start = set_df["time1"].iloc[0]
+        set_end = set_df["time1"].iloc[-1]
 
-            before = neigh[neigh["time1"] < set_start]
-            after = neigh[neigh["time1"] > set_end]
+        before = neigh[neigh["time1"] < set_start]
+        after = neigh[neigh["time1"] > set_end]
 
-            if len(before) > 0:
-                dt_before = (set_start - before["time1"].iloc[-1]).total_seconds()
-                df.loc[0, "dt_prev_s"] = float(dt_before)
+        frames = []
 
-            if len(after) > 0:
-                dt_after = (after["time1"].iloc[0] - set_end).total_seconds()
-                df.loc[len(df) - 1, "dt_next_s"] = float(dt_after)
+        # Row A
+        if len(before) > 0:
+            A = before.iloc[[-1]].copy()
+            A["_role"] = "A"
+            frames.append(A)
 
-        return df
+        # Set rows
+        mid = set_df.copy()
+        mid["_role"] = "set"
+        frames.append(mid)
+
+        # Row Z
+        if len(after) > 0:
+            Z = after.iloc[[0]].copy()
+            Z["_role"] = "Z"
+            frames.append(Z)
+
+        win = pd.concat(frames, ignore_index=True)
+
+        # Keep just the useful columns
+        keep = [c for c in ["_role", "opusid", "time1", "target", self._filter_col] if c in win.columns]
+        win = win[keep].copy()
+
+        # Compute dt on the window
+        win["dt_prev_s"] = win["time1"].diff().dt.total_seconds().abs()
+        win["dt_next_s"] = win["time1"].shift(-1).sub(win["time1"]).dt.total_seconds().abs()
+
+        # Make the set edges clean
+        set_idxs = win.index[win["_role"] == "set"].tolist()
+        if set_idxs:
+            win.loc[set_idxs[0], "dt_prev_s"] = pd.NA
+            win.loc[set_idxs[-1], "dt_next_s"] = pd.NA
+
+        return win
