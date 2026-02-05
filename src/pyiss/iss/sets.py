@@ -17,7 +17,7 @@ def infer_set_dfs(seed_opusid: str):
     t0 = pd.to_datetime(seed["time1"], utc=True)
     target0 = str(seed["target"])
 
-    base = {"instrument": "Cassini ISS", "target": target0}
+    base = {"instrument": "Cassini ISS"}
 
     before = data_df({**base, "time2": seed["time1"], "order": "-time1,opusid", "limit": K}, cols)
     after  = data_df({**base, "time1": seed["time1"], "order":  "time1,opusid", "limit": K}, cols)
