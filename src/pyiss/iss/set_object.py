@@ -26,6 +26,7 @@ class ISSSet:
     def __init__(self, set_df: pd.DataFrame, *, neigh_df: Optional[pd.DataFrame] = None):
         df = set_df.copy()
         df["time1"] = pd.to_datetime(df["time1"], utc=True)
+        df = df.drop(columns=["dt_prev_s", "dt_next_s"], errors="ignore")
         df = df.sort_values(["time1", "opusid"]).reset_index(drop=True)
 
         self._set_df = df
@@ -112,9 +113,38 @@ class ISSSet:
     # --------------------
     def diagnostics(self) -> pd.DataFrame:
         """
-        Return a copy of set_df with dt_prev_s and dt_next_s columns added.
+        Returns a copy of the set df with:
+          - dt_prev_s / dt_next_s: within-set gaps
+          - dt_before_s / dt_after_s: gaps to the nearest neighbours outside the set
+        Requires neigh_df to be present (it is if created via infer_set()).
         """
         df = self._set_df.copy()
+        df = df.sort_values(["time1", "opusid"]).reset_index(drop=True)
+
         df["dt_prev_s"] = df["time1"].diff().dt.total_seconds().abs()
         df["dt_next_s"] = df["time1"].shift(-1).sub(df["time1"]).dt.total_seconds().abs()
+
+        # Boundary gaps (the ones you actually want for validation)
+        df["dt_before_s"] = pd.NA
+        df["dt_after_s"] = pd.NA
+
+        if self._neigh_df is not None and len(self._neigh_df) > 0:
+            neigh = self._neigh_df.copy()
+            neigh["time1"] = pd.to_datetime(neigh["time1"], utc=True)
+            neigh = neigh.sort_values(["time1", "opusid"]).reset_index(drop=True)
+
+            set_start = df["time1"].iloc[0]
+            set_end = df["time1"].iloc[-1]
+
+            before = neigh[neigh["time1"] < set_start]
+            after = neigh[neigh["time1"] > set_end]
+
+            if len(before) > 0:
+                dt_before = (set_start - before["time1"].iloc[-1]).total_seconds()
+                df.loc[0, "dt_before_s"] = float(dt_before)
+
+            if len(after) > 0:
+                dt_after = (after["time1"].iloc[0] - set_end).total_seconds()
+                df.loc[len(df) - 1, "dt_after_s"] = float(dt_after)
+
         return df
