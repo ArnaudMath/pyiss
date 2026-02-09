@@ -1,9 +1,9 @@
 [project]
 name = "pyiss"
-version = "0.1.0"
+version = "0.3.0"
 description = "OPUS-backed helper tools for Cassini ISS"
 requires-python = ">=3.10"
-dependencies = ["requests", "pandas"]
+dependencies = ["requests", "pandas", "numpy", "pillow"]
 
 [build-system]
 requires = ["setuptools>=68"]

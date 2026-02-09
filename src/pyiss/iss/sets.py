@@ -280,4 +280,4 @@ def infer_set(seed_opusid: str) -> ISSSet:
     User-facing API: returns an ISSSet object with nice methods.
     """
     neigh_df, set_df = infer_set_dfs(seed_opusid)
-    return ISSSet(set_df=set_df, neigh_df=neigh_df)
+    return ISSSet(set_df=set_df, neigh_df=neigh_df, seed_opusid=seed_opusid)
