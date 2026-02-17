@@ -174,10 +174,6 @@ class ISSPair:
         """
         if epsilon <= 0:
             raise ValueError("epsilon must be > 0.")
-        if self._image_type != "CAL":
-            raise ValueError(
-                "divide() requires image_type('CAL') to avoid uncalibrated arithmetic."
-            )
         if self._intensity != "DN" and not self._image_calibrated:
             raise ValueError(
                 "Non-DN intensity arithmetic requires image_calibrated=True."
