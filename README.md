@@ -2,7 +2,11 @@
 
 OPUS-backed helper tools for Cassini ISS.
 
-v0.3 focus: composable ISS set operations plus explicit scientific arithmetic.
+v0.4 focus: metadata-driven query builder + composable ISS set operations.
+
+## Docs
+
+- Cassini ISS metadata query parameters: `docs/iss_metadata_parameters.md`
 
 ## Install
 
@@ -15,7 +19,7 @@ In a notebook cell:
 
 **Quickstart**
 ```python
-from pyiss import infer_set
+from pyiss import infer_set, query
 
 # Seed with any valid ISS OPUS ID
 seed = "coiss_2002-03-30_1234"
@@ -40,6 +44,28 @@ obs2 = set0.select("GRN", nearest="time", t="2015-10-14T10:10:00Z")
 obs3 = set0.select(opusid=obs0.df.iloc[0]["opusid"])
 ```
 
+**Metadata-driven query (v0.4)**
+```python
+hits = (
+    query()
+    .time("2008-03-01T00:00:00", "2008-03-02T00:00:00")  # only sugar helper
+    .param("target", "ENCELADUS")
+    .param("phase1", 20)
+    .param("phase2", 80)
+    .limit(50)
+    .fetch("opusid", "time1", "target", "COISSfilter")
+)
+
+hits.size
+hits.df.head()
+
+# preview candidate observations
+hits.show(layout="row").image_size("small").render()
+
+# infer an ISS set from a selected query hit
+set1 = hits.infer_set(which=0)
+```
+
 **Composable v0.2 operations**
 ```python
 # Filter-slicing: returns a new ISSSet-like object
@@ -60,8 +86,12 @@ print(set_mix.metadata("opusid", "time1"))
 
 **Scientific v0.3 operations**
 ```python
-# Intensity declaration is explicit (non-DN requires calibrated previews)
-set0.show("GRN").image_calibrated(True).intensity("I/F")
+# Non-DN display intensity applies a local 1-99% percentile stretch by default
+# (non-DN still requires calibrated previews)
+set0.show("GRN").image_calibrated(True).intensity("I/F").render()
+
+# Optional: set custom local display stretch window
+set0.show("GRN").image_calibrated(True).clip_percentiles(2, 98).intensity("I/F").render()
 
 # Pair using a pre-selected single observation + a filter
 set_cal = set0.image_type("CAL")

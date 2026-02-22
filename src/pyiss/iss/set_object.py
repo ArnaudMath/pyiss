@@ -7,7 +7,7 @@ import warnings
 import pandas as pd
 import requests
 
-from ..opus import data_df
+from ..opus import data_df, to_opus_utc_time
 from .arithmetic import ISSPair
 from .display import ISSSetDisplay, normalize_intensity
 
@@ -175,8 +175,8 @@ class ISSSet:
             self._metadata_cache[field] = series
             return series
 
-        start = self._set_df["time1"].iloc[0].isoformat()
-        end = self._set_df["time1"].iloc[-1].isoformat()
+        start = to_opus_utc_time(self._set_df["time1"].iloc[0])
+        end = to_opus_utc_time(self._set_df["time1"].iloc[-1])
         params = {
             "instrument": "Cassini ISS",
             "time1": start,
@@ -400,6 +400,7 @@ class ISSSet:
         Show preview images for one or more filters (or the whole set).
         Returns a chainable display object:
             set.show("GRN", "UV3", layout="row").image_size("medium").image_calibrated(True)
+            set.show("IR1").image_calibrated(True).intensity("I/F").clip_percentiles(1, 99)
         """
         rows = self._rows_for_filters(filters)
         return ISSSetDisplay(rows, layout=layout)
