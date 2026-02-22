@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .preview import gallery, gallery_html, normalize_image_size, normalize_layout
+from .preview import (
+    gallery,
+    gallery_html,
+    normalize_clip_percentiles,
+    normalize_image_size,
+    normalize_layout,
+)
 
 _INTENSITY_ALIASES = {
     "DN": "DN",
@@ -31,6 +37,7 @@ class ISSSetDisplay:
         self._image_calibrated = False
         self._layout = normalize_layout(layout)
         self._intensity = "DN"
+        self._clip_percentiles: tuple[float, float] | None = None
 
     def _validate_view_config(self) -> None:
         if self._intensity != "DN" and not self._image_calibrated:
@@ -46,6 +53,7 @@ class ISSSetDisplay:
             image_calibrated=self._image_calibrated,
             layout=self._layout,
             intensity=self._intensity,
+            clip_percentiles=self._clip_percentiles,
         )
 
     def image_size(self, value: str) -> "ISSSetDisplay":
@@ -64,6 +72,13 @@ class ISSSetDisplay:
         self._intensity = normalize_intensity(value)
         return self
 
+    def clip_percentiles(self, low: float = 1.0, high: float = 99.0) -> "ISSSetDisplay":
+        """
+        Apply local percentile stretch before plotting.
+        """
+        self._clip_percentiles = normalize_clip_percentiles((low, high))
+        return self
+
     def render(self) -> None:
         """
         Explicitly render the gallery (useful outside notebooks).
@@ -75,4 +90,5 @@ class ISSSetDisplay:
             image_calibrated=self._image_calibrated,
             layout=self._layout,
             intensity=self._intensity,
+            clip_percentiles=self._clip_percentiles,
         )
