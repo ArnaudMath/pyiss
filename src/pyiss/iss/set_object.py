@@ -408,6 +408,112 @@ class ISSSet:
     # --------------------
     # Scientific operations (v0.3)
     # --------------------
+    def find_clear(
+        self,
+        reference_filter: Optional[str] = None,
+        *,
+        max_dt_s: float = 900.0,
+    ) -> "ISSSet":
+        """
+        Find the best matching CLEAR image for this set.
+
+        Search order:
+        1. CLEAR images already present in this set (same cadence block).
+        2. CLEAR images in the wider neighbourhood window (neigh_df from
+           infer_set), within max_dt_s of the reference time and sharing
+           the same Cassini target.
+
+        The reference time is (in order of preference):
+        - midpoint of ``reference_filter`` observations within the set
+        - stored seed time
+        - temporal midpoint of the set
+
+        Args:
+            reference_filter: Filter whose observation time is used as the
+                reference when ranking CLEAR candidates.  For CLEAR
+                subtraction this should be the science filter (e.g. "IR1").
+            max_dt_s: Maximum |Δt| in seconds from the reference time when
+                searching the neighbourhood.  Default: 900 s.
+
+        Returns:
+            Single-row ISSSet containing the best CLEAR observation.
+
+        Raises:
+            ValueError: If no CLEAR can be found anywhere.
+        """
+        CLEAR_LABEL = "CLEAR"
+
+        # --- Reference time ---
+        ref_time: Optional[pd.Timestamp] = None
+        if reference_filter is not None:
+            filt_rows = self._rows_for_filter(str(reference_filter).strip())
+            if not filt_rows.empty and "time1" in filt_rows.columns:
+                ref_time = pd.to_datetime(filt_rows["time1"], utc=True).mean()
+        if ref_time is None:
+            ref_time = self._seed_time
+        if ref_time is None and not self._set_df.empty and "time1" in self._set_df.columns:
+            t_vals = pd.to_datetime(self._set_df["time1"], utc=True)
+            ref_time = t_vals.iloc[0] + (t_vals.iloc[-1] - t_vals.iloc[0]) / 2
+
+        # --- In-set CLEAR candidates ---
+        in_set_clear = self._set_df[
+            self._set_df[self._filter_col].astype(str) == CLEAR_LABEL
+        ].copy()
+
+        # --- Neighbourhood CLEAR candidates ---
+        neigh_clear = pd.DataFrame()
+        if self._neigh_df is not None and not self._neigh_df.empty:
+            neigh = self._neigh_df.copy()
+            if "time1" in neigh.columns:
+                neigh["time1"] = pd.to_datetime(neigh["time1"], utc=True)
+            if (
+                "target" in neigh.columns
+                and "target" in self._set_df.columns
+                and not self._set_df.empty
+            ):
+                set_target = str(self._set_df["target"].iloc[0])
+                neigh = neigh[neigh["target"].astype(str) == set_target]
+            if self._filter_col in neigh.columns:
+                neigh_clear = neigh[neigh[self._filter_col].astype(str) == CLEAR_LABEL].copy()
+
+        # Merge: in-set rows first so they win deduplication
+        all_clear = pd.concat([in_set_clear, neigh_clear], ignore_index=True)
+        if "opusid" in all_clear.columns:
+            all_clear = all_clear.drop_duplicates(subset=["opusid"], keep="first")
+        all_clear = all_clear.reset_index(drop=True)
+
+        if all_clear.empty:
+            raise ValueError(
+                "find_clear() could not find any CLEAR image in the inferred set or "
+                "its neighbourhood.  Consider increasing max_dt_s or verifying the "
+                "seed observation."
+            )
+
+        # --- Apply time window ---
+        if ref_time is not None and "time1" in all_clear.columns:
+            all_clear["time1"] = pd.to_datetime(all_clear["time1"], utc=True)
+            dt = (all_clear["time1"] - ref_time).abs().dt.total_seconds()
+            within = all_clear[dt <= max_dt_s]
+            if not within.empty:
+                all_clear = within.reset_index(drop=True)
+            else:
+                import warnings
+                warnings.warn(
+                    f"find_clear(): no CLEAR found within {max_dt_s}s of reference "
+                    "time; using nearest available candidate.",
+                    stacklevel=2,
+                )
+
+        # --- Pick nearest in time ---
+        if ref_time is not None and "time1" in all_clear.columns:
+            dt_final = (all_clear["time1"] - ref_time).abs().dt.total_seconds()
+            best_iloc = int(dt_final.argmin())
+        else:
+            best_iloc = 0
+
+        best_row = all_clear.iloc[[best_iloc]].reset_index(drop=True)
+        return self._spawn(best_row, neigh_df=None)
+
     def pair(
         self,
         filter_a: Union[str, "ISSSet"],
@@ -475,6 +581,17 @@ class ISSSet:
 
         left, fa, left_single = _resolve_operand(filter_a, "filter_a")
         right, fb, right_single = _resolve_operand(filter_b, "filter_b")
+
+        # CLEAR rescue: if one side is the string "CLEAR" and returned no rows
+        # (e.g. CLEAR was cut off by the gap heuristic), search the neighbourhood.
+        if left.empty and fa == "CLEAR" and not isinstance(filter_a, ISSSet):
+            _clear_set = self.find_clear(reference_filter=fb if fb != "CLEAR" else None)
+            left = _clear_set._set_df.sort_values(["time1", "opusid"]).reset_index(drop=True)
+            left_single = True
+        if right.empty and fb == "CLEAR" and not isinstance(filter_b, ISSSet):
+            _clear_set = self.find_clear(reference_filter=fa if fa != "CLEAR" else None)
+            right = _clear_set._set_df.sort_values(["time1", "opusid"]).reset_index(drop=True)
+            right_single = True
 
         if left.empty or right.empty:
             raise ValueError(f"pair() could not find rows for filters '{fa}' and '{fb}'.")

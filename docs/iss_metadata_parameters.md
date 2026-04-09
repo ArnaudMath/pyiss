@@ -2,7 +2,7 @@
 
 This list is tailored for the **Cassini Imaging Science Subsystem (ISS)** in OPUS and focuses on practical query parameters for `pyiss` users.
 
-## Query Style in `pyiss` v0.4
+## Query Style in `pyiss` v0.4.1
 
 For metadata-driven search, prefer the generic parameter pattern:
 

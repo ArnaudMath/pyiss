@@ -204,6 +204,14 @@ def infer_set_dfs(seed_opusid: str):
     df["time1"] = pd.to_datetime(df["time1"], utc=True)
     df = df.sort_values(["time1", "opusid"]).reset_index(drop=True)
 
+    # Keep only the same camera (NAC vs WAC) as the seed.
+    # OPUS IDs encode the camera as the third dash-separated token's first letter:
+    #   co-iss-n... → NAC,  co-iss-w... → WAC
+    _parts = seed_opusid.lower().split("-")
+    if len(_parts) >= 3 and _parts[2][:1] in ("n", "w"):
+        _cam_prefix = f"co-iss-{_parts[2][:1]}"
+        df = df[df["opusid"].str.lower().str.startswith(_cam_prefix)].reset_index(drop=True)
+
     seed_idx = df.index[df["opusid"] == seed_opusid][0]
 
     # Δt diagnostics (keep them here if you want; ISSSet can hide them from default user view)
