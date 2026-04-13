@@ -153,8 +153,72 @@ def _adaptive_geo_threshold(geo_vals: list[float]) -> float:
     return thr if bimodal else float("inf")
 
 
-def _fetch_data_with_optional_geo(params: dict, base_cols: list[str], geo_cols: list[str]) -> pd.DataFrame:
-    cols_ext = base_cols + geo_cols
+def _ring_radius_cols() -> list[str]:
+    return ["RINGGEOringradius1", "RINGGEOringradius2"]
+
+
+def _ring_geo_bounds(df: pd.DataFrame, *, seed_idx: int) -> tuple[int, int] | None:
+    """
+    Return the [L, R] bounds of the ring-geometry segment containing *seed_idx*.
+
+    The segmenting rule is greedy and conservative:
+      - use the first row of the current run as baseline,
+      - compare both ring radii to that baseline,
+      - require a deviation to persist for the next row before starting a new run.
+
+    Returns None when the required ring-geometry fields are absent or unusable.
+    """
+    ring_cols = _ring_radius_cols()
+    missing = [c for c in ring_cols if c not in df.columns]
+    if missing:
+        return None
+
+    ring = df[ring_cols].apply(pd.to_numeric, errors="coerce")
+    if len(ring) < 3 or ring.isna().any().any():
+        return None
+
+    run_start = 0
+    baseline = ring.iloc[run_start]
+    baseline_scale = float(pd.Series(baseline.values, dtype="float64").median())
+    tol = max(500.0, 0.01 * baseline_scale)
+
+    segments: list[tuple[int, int]] = []
+    i = 1
+    while i < len(df):
+        row = ring.iloc[i]
+        d1 = abs(float(row[ring_cols[0]]) - float(baseline[ring_cols[0]]))
+        d2 = abs(float(row[ring_cols[1]]) - float(baseline[ring_cols[1]]))
+        similar = (d1 <= tol) and (d2 <= tol)
+
+        if similar:
+            i += 1
+            continue
+
+        persistent = False
+        if i + 1 < len(df):
+            nxt = ring.iloc[i + 1]
+            nd1 = abs(float(nxt[ring_cols[0]]) - float(baseline[ring_cols[0]]))
+            nd2 = abs(float(nxt[ring_cols[1]]) - float(baseline[ring_cols[1]]))
+            persistent = (nd1 > tol) and (nd2 > tol)
+
+        if persistent:
+            segments.append((run_start, i - 1))
+            run_start = i
+            baseline = ring.iloc[run_start]
+            baseline_scale = float(pd.Series(baseline.values, dtype="float64").median())
+            tol = max(500.0, 0.01 * baseline_scale)
+        i += 1
+
+    segments.append((run_start, len(df) - 1))
+
+    for L, R in segments:
+        if L <= seed_idx <= R:
+            return L, R
+    return None
+
+
+def _fetch_data_with_optional_fields(params: dict, base_cols: list[str], opt_cols: list[str]) -> pd.DataFrame:
+    cols_ext = base_cols + opt_cols
     try:
         return data_df(params, cols_ext)
     except requests.HTTPError:
@@ -189,15 +253,17 @@ def infer_set_dfs(seed_opusid: str):
     base = {"instrument": "Cassini ISS"}
 
     geo_cols = _surfacegeo_cols(target0)
-    before = _fetch_data_with_optional_geo(
+    ring_cols = _ring_radius_cols()
+    opt_cols = geo_cols + ring_cols
+    before = _fetch_data_with_optional_fields(
         {**base, "time2": seed["time1"], "order": "-time1,opusid", "limit": K},
         cols,
-        geo_cols,
+        opt_cols,
     )
-    after = _fetch_data_with_optional_geo(
+    after = _fetch_data_with_optional_fields(
         {**base, "time1": seed["time1"], "order": "time1,opusid", "limit": K},
         cols,
-        geo_cols,
+        opt_cols,
     )
 
     df = pd.concat([before, after], ignore_index=True).drop_duplicates(subset=["opusid"])
@@ -272,6 +338,18 @@ def infer_set_dfs(seed_opusid: str):
         # Guardrail: geometry should not collapse a valid time-set to singleton.
         if (R - L + 1) == 1 and (time_R - time_L + 1) > 1:
             L, R = time_L, time_R
+
+    # Ring-geometry refinement (v0.4.2)
+    # Uses the target ring-geometry radii as a scene-continuity check.
+    # This is intentionally more permissive than the time-based detector:
+    # if the baseline changes persistently in both radii, start a new run.
+    ring_window = df.iloc[L:R+1].copy().reset_index(drop=True)
+    seed_local_idx = int(ring_window.index[ring_window["opusid"] == seed_opusid][0])
+    ring_bounds = _ring_geo_bounds(ring_window, seed_idx=seed_local_idx)
+    if ring_bounds is not None:
+        ring_L, ring_R = ring_bounds
+        L = L + ring_L
+        R = L + (ring_R - ring_L)
 
     set_df = df.iloc[L:R+1].copy().reset_index(drop=True)
 

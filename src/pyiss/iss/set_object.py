@@ -12,6 +12,64 @@ from .arithmetic import ISSPair
 from .display import ISSSetDisplay, normalize_intensity
 
 
+# ── Geometry helpers (module-level, no circular imports) ──────────────────────
+
+def _geo_target_key(target: str) -> str:
+    """Normalise a target name for SURFACEGEO column lookup (uppercase alphanumeric)."""
+    return "".join(ch for ch in str(target).upper() if ch.isalnum())
+
+
+def _surfacegeo_lat_col(target: str) -> Optional[str]:
+    """Return the SURFACEGEO planetographiclatitude1 column name for *target*, or None."""
+    t = _geo_target_key(target)
+    return f"SURFACEGEO{t}_planetographiclatitude1" if t else None
+
+
+def _batch_in_frame(opusids: list, times, target: str) -> dict:
+    """
+    Batch-fetch in-frame status for *opusids* via one OPUS time-range query.
+
+    Uses the SURFACEGEO planetographiclatitude1 column as a proxy: OPUS only
+    populates surface-geometry fields when the target disk is visible in the
+    image, so a non-null value reliably indicates the target is in-frame.
+
+    Returns ``{opusid: bool | None}``.
+      ``True``  → target body appears to be in-frame.
+      ``False`` → target body appears to be out of frame.
+      ``None``  → check could not be completed (OPUS error or column absent).
+    """
+    col = _surfacegeo_lat_col(target)
+    if col is None:
+        return {str(oid): None for oid in opusids}
+
+    ts = pd.to_datetime(list(times), utc=True)
+    try:
+        fetched = data_df(
+            {
+                "instrument": "Cassini ISS",
+                "time1": to_opus_utc_time(ts.min() - pd.Timedelta(seconds=2)),
+                "time2": to_opus_utc_time(ts.max() + pd.Timedelta(seconds=2)),
+                "order": "time1,opusid",
+                "limit": max(1000, len(opusids) * 20),
+            },
+            ["opusid", col],
+        )
+    except Exception:
+        return {str(oid): None for oid in opusids}
+
+    wanted = {str(o) for o in opusids}
+    lookup: dict = {}
+    for _, row in fetched.iterrows():
+        oid = str(row["opusid"])
+        if oid in wanted:
+            val = row[col]
+            lookup[oid] = bool(
+                pd.notna(val) and str(val).strip() not in ("", "None", "nan")
+            )
+
+    return {str(oid): lookup.get(str(oid)) for oid in opusids}
+
+
 @dataclass(frozen=True)
 class TimeWindow:
     start: pd.Timestamp
@@ -413,6 +471,7 @@ class ISSSet:
         reference_filter: Optional[str] = None,
         *,
         max_dt_s: float = 900.0,
+        check_geometry: bool = True,
     ) -> "ISSSet":
         """
         Find the best matching CLEAR image for this set.
@@ -434,6 +493,13 @@ class ISSSet:
                 subtraction this should be the science filter (e.g. "IR1").
             max_dt_s: Maximum |Δt| in seconds from the reference time when
                 searching the neighbourhood.  Default: 900 s.
+            check_geometry: When True (default), use SURFACEGEO metadata to
+                prefer CLEAR candidates whose in-frame status for the target
+                body matches the reference image.  A mismatch — target
+                in-frame for the CLEAR but out of frame for the science image,
+                or vice versa — injects a ghost artifact upon subtraction.
+                If no compatible candidate is found a UserWarning is issued
+                and the nearest-by-time candidate is returned.
 
         Returns:
             Single-row ISSSet containing the best CLEAR observation.
@@ -503,6 +569,61 @@ class ISSSet:
                     "time; using nearest available candidate.",
                     stacklevel=2,
                 )
+
+        # --- Geometry check (v0.5) ---
+        # Prefer CLEAR candidates whose in-frame status matches the reference
+        # image.  A mismatch (target visible in one frame but not the other)
+        # guarantees a ghost artifact upon CLEAR subtraction.
+        if (
+            check_geometry
+            and reference_filter is not None
+            and ref_time is not None
+            and not all_clear.empty
+            and "opusid" in all_clear.columns
+        ):
+            target_name = (
+                str(self._set_df["target"].iloc[0])
+                if not self._set_df.empty and "target" in self._set_df.columns
+                else ""
+            )
+            if target_name:
+                # Identify the science image: reference-filter row nearest ref_time
+                ref_rows = self._rows_for_filter(str(reference_filter).strip())
+                ref_opusid: Optional[str] = None
+                if not ref_rows.empty and "time1" in ref_rows.columns:
+                    rt_vals = pd.to_datetime(ref_rows["time1"], utc=True)
+                    best_i = int(
+                        (rt_vals - ref_time).abs().dt.total_seconds().argmin()
+                    )
+                    ref_opusid = str(ref_rows.iloc[best_i]["opusid"])
+                elif not ref_rows.empty:
+                    ref_opusid = str(ref_rows.iloc[0]["opusid"])
+
+                if ref_opusid is not None:
+                    all_clear["time1"] = pd.to_datetime(all_clear["time1"], utc=True)
+                    all_oids = [ref_opusid] + all_clear["opusid"].astype(str).tolist()
+                    all_times_geo = [ref_time] + all_clear["time1"].tolist()
+                    in_frame_map = _batch_in_frame(all_oids, all_times_geo, target_name)
+
+                    ref_in_frame = in_frame_map.get(ref_opusid)
+                    if ref_in_frame is not None:
+                        compat_idx = [
+                            i
+                            for i, row in all_clear.iterrows()
+                            if in_frame_map.get(str(row["opusid"])) == ref_in_frame
+                            or in_frame_map.get(str(row["opusid"])) is None
+                        ]
+                        if compat_idx:
+                            all_clear = all_clear.loc[compat_idx].reset_index(drop=True)
+                        else:
+                            warnings.warn(
+                                f"find_clear(): no geometrically compatible CLEAR found "
+                                f"for '{reference_filter}' "
+                                f"(target={target_name}, in_frame={ref_in_frame}). "
+                                "Using nearest-by-time candidate; CLEAR subtraction "
+                                "may produce ghost artifacts.",
+                                stacklevel=2,
+                            )
 
         # --- Pick nearest in time ---
         if ref_time is not None and "time1" in all_clear.columns:
@@ -664,6 +785,189 @@ class ISSSet:
             intensity=norm_intensity,
             image_type=self._image_type,
         )
+
+    def build_pair_table(
+        self,
+        science_filters: Optional[list] = None,
+        *,
+        max_dt_s: float = 600.0,
+        check_geometry: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Build a validated (CLEAR, science-filter) pair table for the entire set.
+
+        For each science-filter image in the set the nearest CLEAR within
+        ``max_dt_s`` is selected.  When ``check_geometry=True`` (default) a
+        single OPUS batch call fetches SURFACEGEO metadata for all images;
+        pairs where the target body is in-frame for one image but out of frame
+        for the other are flagged with ``geometry_warning=True`` and a
+        geometrically compatible CLEAR is preferred instead.
+
+        This is the recommended replacement for hand-written nearest-CLEAR
+        loops in downstream pipelines.  The returned DataFrame matches the
+        ``pairs.parquet`` schema used in CLEAR-subtraction pipelines, with
+        one extra column for the geometry flag.
+
+        Args:
+            science_filters: Filter names to include, e.g. ``["IR1","IR3","RED","BL1"]``.
+                ``None`` (default) processes every non-CLEAR filter in the set.
+            max_dt_s: Maximum |Δt| in seconds between a science image and its
+                CLEAR.  Science images with no CLEAR within this window are
+                skipped with a UserWarning.  Default: 600 s (10 minutes).
+            check_geometry: When ``True`` (default), use SURFACEGEO presence
+                from OPUS to detect pointing mismatches.  Set to ``False`` to
+                reproduce the naive nearest-by-time pairing (useful for
+                comparing old vs. new behaviour).
+
+        Returns:
+            ``pd.DataFrame`` with columns:
+
+            ==================  ================================================
+            clear_opusid        OPUS ID of the selected CLEAR image
+            science_opusid      OPUS ID of the science-filter image
+            science_filter      filter name (e.g. ``"IR1"``)
+            clear_time1         UTC timestamp of the CLEAR image
+            science_time1       UTC timestamp of the science image
+            dt_s                |Δt| in seconds between the pair
+            geometry_warning    ``True`` when pointing geometry is incompatible
+            ==================  ================================================
+
+        Raises:
+            ValueError: If ``max_dt_s`` ≤ 0, no science images match
+                ``science_filters``, or no CLEAR images exist anywhere.
+        """
+        if max_dt_s <= 0:
+            raise ValueError("max_dt_s must be > 0.")
+
+        CLEAR_LABEL = "CLEAR"
+        EMPTY_COLS = [
+            "clear_opusid", "science_opusid", "science_filter",
+            "clear_time1", "science_time1", "dt_s", "geometry_warning",
+        ]
+
+        if self._filter_col not in self._set_df.columns:
+            raise ValueError(
+                f"build_pair_table() requires column '{self._filter_col}' in the set."
+            )
+
+        # Split set into CLEARs and science images
+        filt_col = self._set_df[self._filter_col].astype(str)
+        in_set_clear = self._set_df[filt_col == CLEAR_LABEL].copy()
+        in_set_sci   = self._set_df[filt_col != CLEAR_LABEL].copy()
+
+        if science_filters is not None:
+            wanted = {str(f).strip() for f in science_filters if str(f).strip()}
+            in_set_sci = in_set_sci[
+                in_set_sci[self._filter_col].astype(str).isin(wanted)
+            ]
+
+        if in_set_sci.empty:
+            raise ValueError(
+                "build_pair_table() found no science-filter images. "
+                "Adjust science_filters or check the set."
+            )
+
+        # Collect CLEAR candidates: in-set first, then neighbourhood
+        neigh_clear = pd.DataFrame()
+        if self._neigh_df is not None and not self._neigh_df.empty:
+            neigh = self._neigh_df.copy()
+            if "time1" in neigh.columns:
+                neigh["time1"] = pd.to_datetime(neigh["time1"], utc=True)
+            if (
+                "target" in neigh.columns
+                and "target" in self._set_df.columns
+                and not self._set_df.empty
+            ):
+                set_target = str(self._set_df["target"].iloc[0])
+                neigh = neigh[neigh["target"].astype(str) == set_target]
+            if self._filter_col in neigh.columns:
+                neigh_clear = neigh[
+                    neigh[self._filter_col].astype(str) == CLEAR_LABEL
+                ].copy()
+
+        all_clears = pd.concat([in_set_clear, neigh_clear], ignore_index=True)
+        if "opusid" in all_clears.columns:
+            all_clears = all_clears.drop_duplicates(subset=["opusid"], keep="first")
+        all_clears = all_clears.reset_index(drop=True)
+
+        if all_clears.empty:
+            raise ValueError(
+                "build_pair_table() found no CLEAR images in the set or neighbourhood. "
+                "Ensure the set was created via infer_set() so a neighbourhood window "
+                "is available."
+            )
+
+        all_clears["time1"] = pd.to_datetime(all_clears["time1"], utc=True)
+        in_set_sci = in_set_sci.copy()
+        in_set_sci["time1"] = pd.to_datetime(in_set_sci["time1"], utc=True)
+        in_set_sci = in_set_sci.reset_index(drop=True)
+
+        # Single batch geometry fetch for all images at once
+        target_name = (
+            str(self._set_df["target"].iloc[0])
+            if not self._set_df.empty and "target" in self._set_df.columns
+            else ""
+        )
+        in_frame_map: dict = {}
+        if check_geometry and target_name:
+            all_oids  = (
+                in_set_sci["opusid"].astype(str).tolist()
+                + all_clears["opusid"].astype(str).tolist()
+            )
+            all_times = list(in_set_sci["time1"]) + list(all_clears["time1"])
+            in_frame_map = _batch_in_frame(all_oids, all_times, target_name)
+
+        # Pair each science image to its best available CLEAR
+        rows = []
+        for _, sci in in_set_sci.iterrows():
+            sci_t = sci["time1"]
+            dt = (all_clears["time1"] - sci_t).abs().dt.total_seconds()
+            within_idx = all_clears.index[dt <= max_dt_s].tolist()
+
+            if not within_idx:
+                warnings.warn(
+                    f"build_pair_table(): no CLEAR within {max_dt_s}s for "
+                    f"'{sci['opusid']}' ({sci[self._filter_col]}); skipping.",
+                    stacklevel=2,
+                )
+                continue
+
+            geometry_warning = False
+
+            if check_geometry and target_name and in_frame_map:
+                sci_in_frame = in_frame_map.get(str(sci["opusid"]))
+                if sci_in_frame is not None:
+                    compat_idx = [
+                        i for i in within_idx
+                        if in_frame_map.get(str(all_clears.loc[i, "opusid"])) == sci_in_frame
+                        or in_frame_map.get(str(all_clears.loc[i, "opusid"])) is None
+                    ]
+                    if compat_idx:
+                        best_idx = int(dt.loc[compat_idx].idxmin())
+                    else:
+                        # No compatible CLEAR: use nearest and flag
+                        best_idx = int(dt.loc[within_idx].idxmin())
+                        geometry_warning = True
+                else:
+                    best_idx = int(dt.loc[within_idx].idxmin())
+            else:
+                best_idx = int(dt.loc[within_idx].idxmin())
+
+            best_clear = all_clears.loc[best_idx]
+            rows.append({
+                "clear_opusid":      str(best_clear["opusid"]),
+                "science_opusid":    str(sci["opusid"]),
+                "science_filter":    str(sci[self._filter_col]),
+                "clear_time1":       best_clear["time1"],
+                "science_time1":     sci_t,
+                "dt_s":              float(dt.loc[best_idx]),
+                "geometry_warning":  geometry_warning,
+            })
+
+        if not rows:
+            return pd.DataFrame(columns=EMPTY_COLS)
+
+        return pd.DataFrame(rows)
 
     # --------------------
     # Diagnostics (opt-in)

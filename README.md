@@ -2,7 +2,7 @@
 
 OPUS-backed helper tools for Cassini ISS.
 
-v0.4.1 bug fixes: NAC/WAC camera separation in set inference; `find_clear()` for robust CLEAR pairing.
+v0.4.2 refinement: ring-geometry independent boundary detection in `infer_set()`. v0.4.1: NAC/WAC camera separation in set inference; `find_clear()` for robust CLEAR pairing.
 v0.4 focus: metadata-driven query builder + composable ISS set operations.
 
 ## Docs
@@ -107,7 +107,7 @@ ratio.summary()
 ratio.show()
 ```
 
-**CLEAR subtraction (v0.4.1)**
+**CLEAR subtraction (v0.4.2)**
 ```python
 # Find the best matching CLEAR for this set (searches in-set first, then the
 # wider neighbourhood window; always returns a NAC/WAC-matched single observation)
