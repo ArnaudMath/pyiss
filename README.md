@@ -2,6 +2,15 @@
 
 OPUS-backed helper tools for Cassini ISS.
 
+> **Name.** This is a research tool written for the thesis and paper on luminous
+> bands in Saturn's E ring. It is distributed through this GitHub repository only
+> and is **not** published on PyPI. It is unrelated to the PyPI package
+> [`pyiss`](https://pypi.org/project/pyiss/) (International Space Station
+> location); both use the import name `pyiss`, so do not install them in the same
+> environment. If this tool is ever published as a package, it will be renamed.
+>
+> License: MIT. Author: Arnaud Mathieu.
+
 v0.4.2 refinement: ring-geometry independent boundary detection in `infer_set()`. v0.4.1: NAC/WAC camera separation in set inference; `find_clear()` for robust CLEAR pairing.
 v0.4 focus: metadata-driven query builder + composable ISS set operations.
 

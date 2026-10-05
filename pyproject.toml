@@ -1,12 +1,25 @@
 [project]
 name = "pyiss"
 version = "0.4.2"
-description = "OPUS-backed helper tools for Cassini ISS"
-requires-python = ">=3.10"
-dependencies = ["requests", "pandas", "numpy", "pillow"]
+description = "OPUS-backed helper tools for Cassini ISS (thesis research tool; not published on PyPI)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Arnaud Mathieu", email = "arnaudmath00@gmail.com" }]
+requires-python = ">=3.11"
+# Lower bounds = versions used for the paper (Python 3.13); upper bounds = next major release.
+dependencies = [
+    "requests>=2.34,<3",
+    "pandas>=3.0,<4",
+    "numpy>=2.5,<3",
+    "pillow>=12.3,<13",
+]
+
+[project.urls]
+Repository = "https://github.com/ArnaudMath/pyiss"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
